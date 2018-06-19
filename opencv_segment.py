@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import sys
 import glob
 from os.path import basename, dirname, realpath
-from preprocess import get_area, remove_noisy_contours
-DEBUG_IMGS = True
+from preprocess import *
+DEBUG_IMGS = False
 
 
 def leaf_segment(filename):
@@ -22,15 +22,9 @@ def leaf_segment(filename):
 
 #otsu threshold it to get a decent binary segmentation (but doesn't get different leaves)
     ret1, otsu = cv.threshold(img2,0,255,cv.THRESH_BINARY+cv.THRESH_OTSU)
-    img2 = cv.bitwise_and(img2, img2, mask=otsu)
-    cnts = remove_noisy_contours(otsu)
-    otsu = np.zeros_like(otsu)
-    cv.drawContours(otsu, cnts, -1, 255, -1)
-    if DEBUG_IMGS: cv.imwrite("debug_imgs/otsu-thresh.png", otsu)
-    img2 = cv.bitwise_and(img2, img2, mask=otsu)
-    if DEBUG_IMGS: cv.imwrite("debug_imgs/cutout-plants.png", img2)
 
 #try k-means instead
+#internal contour holes don't get recognized with this method for some reason
     # imgflat = img2.reshape((-1, 1))
     # imgflat = np.float32(imgflat)
     # criteria=(cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 10, 1.0)
@@ -44,6 +38,15 @@ def leaf_segment(filename):
     # cnts = remove_noisy_contours(otsu)
     # otsu = np.zeros_like(otsu)
     # cv.drawContours(otsu, cnts, 0, 255, -1)
+
+
+    img2 = cv.bitwise_and(img2, img2, mask=otsu)
+    _, cnts, __ = cv.findContours(otsu, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
+    cnts = list(filter(lambda x: cv.contourArea(x) > MIN_CONTOUR_AREA, cnts))
+    cnts = np.array(sorted(cnts, key=cv.contourArea, reverse=True))
+    otsu = np.zeros_like(otsu)
+    cv.drawContours(otsu, cnts, -1, 255, -1)
+    if DEBUG_IMGS: cv.imwrite("debug_imgs/otsu-thresh.png", otsu)
 
 
     # img2 = cv.equalizeHist(img2)
@@ -86,7 +89,7 @@ if __name__ == "__main__":
     scriptpath = dirname(realpath(sys.argv[0]))
     files = []
     if len(sys.argv) == 1:
-        imgs = glob.glob(scriptpath +"/raw/*.JPG")
+        imgs = glob.glob(scriptpath +"/raw/*/*.JPG")
     else:
         imgs = [realpath(sys.argv[1])]
 
