@@ -5,7 +5,7 @@ import sys
 import glob
 from os.path import basename, dirname, realpath
 from preprocess import *
-DEBUG_IMGS = False
+DEBUG_IMGS = True
 
 
 def leaf_segment(filename):

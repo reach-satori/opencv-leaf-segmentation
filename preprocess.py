@@ -61,7 +61,7 @@ def get_area(img):
     proc = cv.cvtColor(img, cv.COLOR_BGR2HSV)
     (h, s, v) = cv.split(proc)
     proc = cv.subtract(s, v)
-    ret, proc = cv.threshold(proc, 255//3, 255, cv.THRESH_BINARY)
+    ret, proc = cv.threshold(proc, 255//2, 255, cv.THRESH_BINARY)
     proc = cv.morphologyEx(proc, cv.MORPH_CLOSE, cv.getStructuringElement(cv.MORPH_ELLIPSE, (7,7)), iterations=4)
     proc = cv.morphologyEx(proc, cv.MORPH_ERODE, cv.getStructuringElement(cv.MORPH_ELLIPSE, (11,11)))
     # cv.imwrite("binary.jpg", proc)
