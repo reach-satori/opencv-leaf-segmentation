@@ -8,17 +8,54 @@ class Segmenter(object):
     def __init__(self, img):
         #least modified necessary image at each step
         self.proc_img = img
+        self.grid_scale = None
         self.segmentation_map = None
+
         self.MIN_CONTOUR_AREA = 800
         self.DEBUG_IMGS = False
 
+    def get_grid(self):
+        PERCENTILE = 99.
+        f = self.proc_img.copy()
+        f = cv.medianBlur(f, 3)
+        f = cv.Canny(f, 100, 200)
+        # fourier transform the edge detection
+        f = np.fft.fft2(f)
+        absfft = np.abs(f)
+        # only let pixels brighter than PERCENTILE through
+        perc = np.percentile(absfft, PERCENTILE)
+        f[absfft < perc] = 0
+        f = np.abs(np.fft.ifft2(f))
+        f = np.interp(f, (f.min(), f.max()), (0., 1.))
+        f *= 255
+        f = f.astype(np.uint8)
+        self.grid_scale=f
+        # at this point f should be the canny detected image with only the grid (high freq) highlighted
+        # (+ some noise due to rounding)
+
+        _, f = cv.threshold(f, 127, 255, cv.THRESH_BINARY)
+        f = cv.blur(f, (15, 15))
+        _, f = cv.threshold(f, 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
+        # self.grid_scale = f
+
+
+
+
+        # scale and return to 8 bit image
+        # f = np.interp(f, (f.min(), f.max()), (0, 255))
+        # f = f.astype(np.uint8)
+
+
+
+
     def run(self):
-        #self.proc_img gets modified after each stage
-        self.get_soil_area()
-        self.get_leaves()
-        self.get_segmentation_map()
-        self.get_visualization()
-        return self.proc_img
+        self.get_grid()
+        #self.proc_img (usually) gets modified at each stage
+        # self.get_soil_area()
+        # self.get_plant_area()
+        # self.get_segmentation_map()
+        # self.get_visualization()
+        return self.grid_scale
 
     def get_visualization(self):
         self.proc_img[self.segmentation_map==255] = [255, 0 , 0]
@@ -26,7 +63,7 @@ class Segmenter(object):
 
 
     def get_segmentation_map(self):
-        ####### cut out leaves ########
+        #cut out leaves
         (b, g, r) = cv.split(self.proc_img)
         g_b = cv.subtract(g, b)
         g_b = cv.normalize(g_b, g_b, 0, 255, cv.NORM_MINMAX, -1)
@@ -54,14 +91,14 @@ class Segmenter(object):
         dist *= 255
         dist = dist.astype(np.uint8)
         if self.DEBUG_IMGS: cv.imwrite("debug_imgs/dist-transform.png", dist)
-
         kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
-        _, sure_fg = cv.threshold(dist, 0.4*dist.max(), 255, 0)
+        _, sure_fg = cv.threshold(dist, 0.6*dist.max(), 255, 0)
+
+        #cut out barriers from watershed seeds
         canny = g_b.copy()
-        canny = cv.Canny(canny, 100, 200)
+        canny = cv.Canny(canny, 70, 255)
         canny = cv.morphologyEx(canny, cv.MORPH_DILATE, kernel, iterations=2)
         sure_fg = cv.subtract(sure_fg, canny)
-
 
         _, markers = cv.connectedComponents(sure_fg)
         if self.DEBUG_IMGS: cv.imwrite("debug_imgs/watershed-seeds.png", sure_fg)
@@ -81,7 +118,7 @@ class Segmenter(object):
         self.segmentation_map = vis
 
 
-    def get_leaves(self):
+    def get_plant_area(self):
         b, g, r = cv.split(self.proc_img)
         g_b = cv.subtract(g, b)
         _, otsu = cv.threshold(g_b,0,255,cv.THRESH_BINARY+cv.THRESH_OTSU)
