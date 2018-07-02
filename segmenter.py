@@ -1,7 +1,16 @@
 import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
+from consts import *
 
+#Takes in a greyscale image and returns that greyscale image histogram-equalized (excluding all input 0 pixels)
+def mask_hist_eq(mat):
+    hist = cv.calcHist([mat], [0], mat, [256], [0, 256]).ravel().astype(np.uint8)
+    lut = hist.cumsum()
+    lut = 255 * lut / lut[-1]
+    np.round(lut).astype(np.uint8)
+    mat = cv.LUT(mat, lut)
+    return mat
 
 
 class Segmenter(object):
@@ -11,42 +20,60 @@ class Segmenter(object):
         self.grid_scale = None
         self.segmentation_map = None
 
-        self.MIN_CONTOUR_AREA = 800
-        self.DEBUG_IMGS = False
+        #threshold to ignore contours during various contour manipulations
+        self.MIN_CONTOUR_AREA = MIN_CONTOUR_AREA
+        #output debug images, yes or no
+        self.DEBUG_IMGS = DEBUG_IMGS
+        #brightness percentile below which pixels in the get_grid fourier transform get ignored
+        self.FOURIER_PERCENTILE = FOURIER_PERCENTILE
+        #Canny detections thresholds for get_grid
+        self.GRID_CANNY_LOWER = GRID_CANNY_LOWER
+        self.GRID_CANNY_UPPER = GRID_CANNY_UPPER
 
+    #not so good approach
+    #histeq -> median blur -> canny -> fft -> threshold -> ifft ...
+    #there has to be a better way
     def get_grid(self):
         PERCENTILE = 99.
         f = self.proc_img.copy()
-        f = cv.medianBlur(f, 3)
-        f = cv.Canny(f, 100, 200)
+
+        f = cv.split(f)
+        for channel in f:
+            channel = cv.equalizeHist(channel)
+        f = cv.merge(f)
+
+        # f = cv.medianBlur(f, 3)
+        f = cv.Canny(f, self.GRID_CANNY_LOWER, GRID_CANNY_UPPER)
         # fourier transform the edge detection
         f = np.fft.fft2(f)
         absfft = np.abs(f)
-        # only let pixels brighter than PERCENTILE through
-        perc = np.percentile(absfft, PERCENTILE)
+        # only let pixels brighter than FOURIER_PERCENTILE through
+        perc = np.percentile(absfft, self.FOURIER_PERCENTILE)
         f[absfft < perc] = 0
         f = np.abs(np.fft.ifft2(f))
-        f = np.interp(f, (f.min(), f.max()), (0., 1.))
-        f *= 255
+        f = np.interp(f, (f.min(), f.max()), (0., 255.))
         f = f.astype(np.uint8)
-        self.grid_scale=f
         # at this point f should be the canny detected image with only the grid (high freq) highlighted
         # (+ some noise due to rounding)
 
-        _, f = cv.threshold(f, 127, 255, cv.THRESH_BINARY)
-        f = cv.blur(f, (15, 15))
+        _, f = cv.threshold(f, 170, 255, cv.THRESH_BINARY)
+        f = cv.blur(f, (20, 20))
         _, f = cv.threshold(f, 0, 255, cv.THRESH_BINARY+cv.THRESH_OTSU)
-        # self.grid_scale = f
+        f = cv.morphologyEx(f, cv.MORPH_DILATE, cv.getStructuringElement(cv.MORPH_ELLIPSE, (7,7)), iterations=2)
+        _, cnts, __ = cv.findContours(f, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        cnts = list(filter(lambda x: cv.contourArea(x) > self.MIN_CONTOUR_AREA, cnts))
+        cnts = np.array(sorted(cnts, key=cv.contourArea, reverse=True))
 
-
-
-
-        # scale and return to 8 bit image
-        # f = np.interp(f, (f.min(), f.max()), (0, 255))
-        # f = f.astype(np.uint8)
-
-
-
+        mask = np.zeros_like(f)
+        cv.drawContours(mask, cnts, 0, 255, -1)
+        f = cv.bitwise_and(self.proc_img, self.proc_img, mask=mask)
+        cnt = cnts[0]
+        (x, y, w, h) = cv.boundingRect(cnt)
+        f = f[y:y+h, x:x+w]
+        f = cv.cvtColor(f, cv.COLOR_BGR2GRAY)
+        f = mask_hist_eq(f)
+        # self.proc_img=f
+        self.grid_scale = f
 
     def run(self):
         self.get_grid()
