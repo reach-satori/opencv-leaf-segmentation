@@ -2,18 +2,51 @@ import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
 from consts import *
+from copy import deepcopy
 
 #Takes in a greyscale image and returns that greyscale image histogram-equalized (excluding all input 0 pixels)
 def mask_hist_eq(mat):
     hist = cv.calcHist([mat], [0], mat, [256], [0, 256]).ravel().astype(np.uint8)
     lut = hist.cumsum()
     lut = 255 * lut / lut[-1]
-    np.round(lut).astype(np.uint8)
+    lut = np.round(lut).astype(np.uint8)
     mat = cv.LUT(mat, lut)
     return mat
 
 
 class Segmenter(object):
+
+
+    class RotatedRect(object):
+        #this convenience object is meant to be initiated with the return from cv2.minAreaRect
+        #it's basically just a POD struct
+        #it's initiated here because it's not meant to be reused outside Segmenter
+        # ((center_x, center_y), (width, height), angle)
+        def __init__(self, rect_tuple):
+            self.center = rect_tuple[0]
+            self.width = rect_tuple[1][1]
+            self.height = rect_tuple[1][0]
+            self.angle = np.deg2rad(90+rect_tuple[2])
+
+        def get_points(self):
+            cx = self.center[0]
+            cy = self.center[1]
+            vertices = [
+                    [-self.width/2, -self.height/2],
+                    [-self.width/2, self.height/2],
+                    [self.width/2,  self.height/2],
+                    [self.width/2,  -self.height/2],
+                    ]
+
+            for pt in vertices:
+                temp0 = pt[0]*np.cos(self.angle) - pt[1]*np.sin(self.angle) + cx
+                temp1 = pt[0]*np.sin(self.angle) + pt[1]*np.cos(self.angle) + cy
+                pt[0] = temp0
+                pt[1] = temp1
+
+            return tuple(vertices)
+
+
     def __init__(self, img):
         #least modified necessary image at each step
         self.proc_img = img
@@ -72,12 +105,60 @@ class Segmenter(object):
         f = f[y:y+h, x:x+w]
         f = cv.cvtColor(f, cv.COLOR_BGR2GRAY)
         f = mask_hist_eq(f)
-        # self.proc_img=f
+        #at this point f is (with about 90% reliability) the milimiter paper grid
+        # cropped out, masked out and histogram equalized
         self.grid_scale = f
+
+    def get_scale(self):
+        #first step to get scale from equalized grid image is to remove the border squares that are likely to be malformed
+        # print(self.grid_scale.dtype, self.grid_scale.shape)
+        overlap_outer = self.grid_scale.copy()
+        _, overlap_outer = cv.threshold(overlap_outer, 1, 255, cv.THRESH_BINARY)
+        overlap_outer = cv.morphologyEx(overlap_outer, cv.MORPH_CLOSE, cv.getStructuringElement(cv.MORPH_ELLIPSE, (7, 7)))
+        overlap_outer = cv.bitwise_not(overlap_outer)
+        overlap_outer = cv.morphologyEx(overlap_outer, cv.MORPH_DILATE, cv.getStructuringElement(cv.MORPH_ELLIPSE, (11, 11)))
+
+        overlap_inner = self.grid_scale.copy()
+        overlap_inner = cv.adaptiveThreshold(overlap_inner, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY, 21, 0)
+        overlap = cv.bitwise_and(overlap_inner, overlap_outer)
+
+        _, labels = cv.connectedComponents(overlap_inner, connectivity = 4)
+        discarded = np.unique(labels[overlap != 0])
+        flattened = labels.flatten()
+        for i, pix in enumerate(flattened):
+            if pix in discarded:
+                flattened[i] = 0
+        labels = flattened.reshape(labels.shape).astype(np.uint8)
+        _, cnts, __ = cv.findContours(labels, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+
+        #minarearect returns ((center_x, center_y), (width, height), angle)
+        rects = list(map(self.RotatedRect, list(map(cv.minAreaRect, cnts))))
+        labels = labels.astype(np.uint8)
+        _, labels = cv.threshold(labels, 1, 255, cv.THRESH_BINARY)
+        labels = cv.cvtColor(labels, cv.COLOR_GRAY2BGR)
+
+        for rect in rects:
+            pts = np.array(rect.get_points(), np.int32)
+            col = (255, 0, 0)
+            print(rect.angle)
+            if rect.angle == 0: col = (0, 0, 255)
+            labels = cv.polylines(labels, [pts], 1, col)
+
+        # plt.imshow(labels)
+        # plt.show()
+        self.grid_scale = labels
+        #here rectangles should be sufficiently well-formed to be a dataset of sorts
+        #need to figure out how to remove outliers and noise, as well as reject failed grid extractions
+        #width/height ratio::
+        #area deviation from mean
+        #angle deviation from mean?
+
+
 
     def run(self):
         self.get_grid()
-        #self.proc_img (usually) gets modified at each stage
+        self.get_scale()
+
         # self.get_soil_area()
         # self.get_plant_area()
         # self.get_segmentation_map()
@@ -90,7 +171,7 @@ class Segmenter(object):
 
 
     def get_segmentation_map(self):
-        #cut out leaves
+            #cut out leaves
         (b, g, r) = cv.split(self.proc_img)
         g_b = cv.subtract(g, b)
         g_b = cv.normalize(g_b, g_b, 0, 255, cv.NORM_MINMAX, -1)
@@ -99,8 +180,8 @@ class Segmenter(object):
 
         #remove noise from contours
         _, cnts, __ = cv.findContours(otsu, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
-        cnts = list(filter(lambda x: cv.contourArea(x) > self.MIN_CONTOUR_AREA, cnts))
-        cnts = np.array(sorted(cnts, key=cv.contourArea, reverse=True))
+        #necessarily should have just one contour because that's how we get the grid in the first place
+        cnt = cnts[0]
 
         #redraw contours, leaving out noise
         otsu = np.zeros_like(otsu)
@@ -127,7 +208,7 @@ class Segmenter(object):
         canny = cv.morphologyEx(canny, cv.MORPH_DILATE, kernel, iterations=2)
         sure_fg = cv.subtract(sure_fg, canny)
 
-        _, markers = cv.connectedComponents(sure_fg)
+        _, markers = cv.connectedComponents(sure_fg, connectivity=4)
         if self.DEBUG_IMGS: cv.imwrite("debug_imgs/watershed-seeds.png", sure_fg)
 
         g_b = cv.cvtColor(g_b, cv.COLOR_GRAY2BGR)
