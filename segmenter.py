@@ -16,7 +16,6 @@ def mask_hist_eq(mat):
 
 class Segmenter(object):
 
-
     class RotatedRect(object):
         #this convenience object is meant to be initiated with the return from cv2.minAreaRect
         #it's basically just a POD struct
@@ -26,7 +25,7 @@ class Segmenter(object):
             self.center = rect_tuple[0]
             self.width = rect_tuple[1][1]
             self.height = rect_tuple[1][0]
-            self.angle = np.deg2rad(90+rect_tuple[2])
+            self.angle = np.deg2rad(rect_tuple[2])
 
         def get_points(self):
             cx = self.center[0]
@@ -75,7 +74,6 @@ class Segmenter(object):
             channel = cv.equalizeHist(channel)
         f = cv.merge(f)
 
-        # f = cv.medianBlur(f, 3)
         f = cv.Canny(f, self.GRID_CANNY_LOWER, GRID_CANNY_UPPER)
         # fourier transform the edge detection
         f = np.fft.fft2(f)
@@ -128,30 +126,37 @@ class Segmenter(object):
         for i, pix in enumerate(flattened):
             if pix in discarded:
                 flattened[i] = 0
+
         labels = flattened.reshape(labels.shape).astype(np.uint8)
         _, cnts, __ = cv.findContours(labels, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
-        #minarearect returns ((center_x, center_y), (width, height), angle)
-        rects = list(map(self.RotatedRect, list(map(cv.minAreaRect, cnts))))
-        labels = labels.astype(np.uint8)
-        _, labels = cv.threshold(labels, 1, 255, cv.THRESH_BINARY)
-        labels = cv.cvtColor(labels, cv.COLOR_GRAY2BGR)
+        # here rectangles should be sufficiently well-formed to be a dataset of sorts
+        # after just a small filtering out of outliers:
+        #first remove non-square rectangles since it doesn't depend on mean/std dev etc
+        square_threshold = 1.25
+        cnts[:] = [cnt for cnt in cnts if abs(1-cv.minAreaRect(cnt)[1][0]/cv.minAreaRect(cnt)[1][1]) < square_threshold]
 
-        for rect in rects:
-            pts = np.array(rect.get_points(), np.int32)
-            col = (255, 0, 0)
-            print(rect.angle)
-            if rect.angle == 0: col = (0, 0, 255)
-            labels = cv.polylines(labels, [pts], 1, col)
+        # discard contours with area "m"+ sigma away from mean
+        areas = np.array([cv.contourArea(x) for x in cnts])
+        m = 2
+        cnts[:] = [cnt for cnt in cnts if abs(cv.contourArea(cnt)-np.mean(areas)) < m * np.std(areas)]
 
+        # minarearect returns ((center_x, center_y), (width, height), angle)
+        # debug visualization:
+
+        # rects = (self.RotatedRect(cv.minAreaRect(cnt)) for cnt in cnts)
+        # labels = labels.astype(np.uint8)
+        # _, labels = cv.threshold(labels, 1, 255, cv.THRESH_BINARY)
+        # labels = cv.cvtColor(labels, cv.COLOR_GRAY2BGR)
+
+        # for rect in rects:
+        #     pts = np.array(rect.get_points(), np.int32)
+        #     col = (255, 0, 0)
+        #     print(np.rad2deg(rect.angle))
+        #     if rect.angle == 0: col = (0, 0, 255)
+        #     labels = cv.polylines(labels, [pts], 1, col)
         # plt.imshow(labels)
         # plt.show()
-        self.grid_scale = labels
-        #here rectangles should be sufficiently well-formed to be a dataset of sorts
-        #need to figure out how to remove outliers and noise, as well as reject failed grid extractions
-        #width/height ratio::
-        #area deviation from mean
-        #angle deviation from mean?
 
 
 
