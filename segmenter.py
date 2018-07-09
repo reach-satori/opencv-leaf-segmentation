@@ -2,7 +2,7 @@ import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
 from consts import *
-from copy import deepcopy
+from math import ceil
 
 #Takes in a greyscale image and returns that greyscale image histogram-equalized (excluding all input 0 pixels)
 def mask_hist_eq(mat):
@@ -12,6 +12,18 @@ def mask_hist_eq(mat):
     lut = np.round(lut).astype(np.uint8)
     mat = cv.LUT(mat, lut)
     return mat
+
+def rotate_about_center(src, angle, scale=1.):
+    w = src.shape[1]
+    h = src.shape[0]
+    rangle = np.deg2rad(angle)
+    nw = (abs(np.sin(rangle)*h) + abs(np.cos(rangle)*w))*scale
+    nh = (abs(np.cos(rangle)*h) + abs(np.sin(rangle)*w))*scale
+    rot_mat = cv.getRotationMatrix2D((nw/2., nh/2.), angle, scale)
+    rot_move = np.dot(rot_mat, np.array([(nw-w)/2., (nh-h)/2.,0]))
+    rot_mat[0,2] += rot_move[0]
+    rot_mat[1,2] += rot_move[1]
+    return cv.warpAffine(src, rot_mat, (int(ceil(nw)), int(ceil(nh))), flags=cv.INTER_LANCZOS4)
 
 
 class Segmenter(object):
@@ -25,7 +37,7 @@ class Segmenter(object):
             self.center = rect_tuple[0]
             self.width = rect_tuple[1][1]
             self.height = rect_tuple[1][0]
-            self.angle = np.deg2rad(rect_tuple[2])
+            self.angle = rect_tuple[2]
 
         def get_points(self):
             cx = self.center[0]
@@ -74,7 +86,7 @@ class Segmenter(object):
             channel = cv.equalizeHist(channel)
         f = cv.merge(f)
 
-        f = cv.Canny(f, self.GRID_CANNY_LOWER, GRID_CANNY_UPPER)
+        f = cv.Canny(f, self.GRID_CANNY_LOWER, self.GRID_CANNY_UPPER)
         # fourier transform the edge detection
         f = np.fft.fft2(f)
         absfft = np.abs(f)
@@ -108,7 +120,7 @@ class Segmenter(object):
         self.grid_scale = f
 
     def get_scale(self):
-        #first step to get scale from equalized grid image is to remove the border squares that are likely to be malformed
+        # first step to get scale from equalized grid image is to remove the border squares that are likely to be malformed
         # print(self.grid_scale.dtype, self.grid_scale.shape)
         overlap_outer = self.grid_scale.copy()
         _, overlap_outer = cv.threshold(overlap_outer, 1, 255, cv.THRESH_BINARY)
@@ -126,37 +138,50 @@ class Segmenter(object):
         for i, pix in enumerate(flattened):
             if pix in discarded:
                 flattened[i] = 0
-
         labels = flattened.reshape(labels.shape).astype(np.uint8)
-        _, cnts, __ = cv.findContours(labels, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
+        _, cnts, __ = cv.findContours(labels, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         # here rectangles should be sufficiently well-formed to be a dataset of sorts
         # after just a small filtering out of outliers:
-        #first remove non-square rectangles since it doesn't depend on mean/std dev etc
+        #first remove non-square contours
         square_threshold = 1.25
+        #solve division by 0
+        cnts[:] = [cnt for cnt in cnts if cv.minAreaRect(cnt)[1][1] != 0]
         cnts[:] = [cnt for cnt in cnts if abs(1-cv.minAreaRect(cnt)[1][0]/cv.minAreaRect(cnt)[1][1]) < square_threshold]
 
         # discard contours with area "m"+ sigma away from mean
         areas = np.array([cv.contourArea(x) for x in cnts])
-        m = 2
+        m = 3
         cnts[:] = [cnt for cnt in cnts if abs(cv.contourArea(cnt)-np.mean(areas)) < m * np.std(areas)]
 
-        # minarearect returns ((center_x, center_y), (width, height), angle)
-        # debug visualization:
+        #get the angle the grid is at by applying HoughLines to a Sobel detection in one direction only
+        anglemeasure = np.zeros_like(labels)
+        cv.drawContours(anglemeasure, cnts, -1, 255, -1)
+        labels = anglemeasure.copy()
+        anglemeasure = cv.Scharr(anglemeasure, -1, 0, 1)
+        gridangle = 0
+        for linethresh in range(300, 0, -20):
+            lines = cv.HoughLines(anglemeasure, 1, np.pi/360, linethresh)
+            # if lines is not None:print(lines.shape)
+            # else:print(linethresh)
+            if lines is None or lines.shape[0] < 3:
+                continue
+            gridangle = np.median(np.squeeze(lines)[:, 1])
+            # visualization:
+            # for rho,theta in lines:
+            #     a = np.cos(theta)
+            #     b = np.sin(theta)
+            #     x0 = a*rho
+            #     y0 = b*rho
+            #     x1 = int(x0 + 1000*(-b))
+            #     y1 = int(y0 + 1000*(a))
+            #     x2 = int(x0 - 1000*(-b))
+            #     y2 = int(y0 - 1000*(a))
+            #     cv.line(labels,(x1,y1),(x2,y2),127,1)
+            break
 
-        # rects = (self.RotatedRect(cv.minAreaRect(cnt)) for cnt in cnts)
-        # labels = labels.astype(np.uint8)
-        # _, labels = cv.threshold(labels, 1, 255, cv.THRESH_BINARY)
-        # labels = cv.cvtColor(labels, cv.COLOR_GRAY2BGR)
-
-        # for rect in rects:
-        #     pts = np.array(rect.get_points(), np.int32)
-        #     col = (255, 0, 0)
-        #     print(np.rad2deg(rect.angle))
-        #     if rect.angle == 0: col = (0, 0, 255)
-        #     labels = cv.polylines(labels, [pts], 1, col)
-        # plt.imshow(labels)
-        # plt.show()
+        labels = rotate_about_center(labels, gridangle)
+        self.grid_scale = labels
 
 
 
