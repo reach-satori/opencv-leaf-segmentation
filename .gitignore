@@ -1,4 +1,6 @@
 __pycache__
+all_raw/*
+all_raw
 raw/*
 raw/*/*
 processed

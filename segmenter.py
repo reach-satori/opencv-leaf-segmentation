@@ -1,6 +1,7 @@
 import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.signal import find_peaks_cwt
 from consts import *
 from math import ceil
 
@@ -159,7 +160,7 @@ class Segmenter(object):
         cv.drawContours(anglemeasure, cnts, -1, 255, -1)
         labels = anglemeasure.copy()
         anglemeasure = cv.Scharr(anglemeasure, -1, 0, 1)
-        gridangle = 0
+        gridangle = None
         for linethresh in range(300, 0, -20):
             lines = cv.HoughLines(anglemeasure, 1, np.pi/360, linethresh)
             # if lines is not None:print(lines.shape)
@@ -180,8 +181,58 @@ class Segmenter(object):
             #     cv.line(labels,(x1,y1),(x2,y2),127,1)
             break
 
-        labels = rotate_about_center(labels, gridangle)
-        self.grid_scale = labels
+        if gridangle is None:
+            self.grid_scale = 20 #in case of failure use a reasonable constant instead
+            return
+        labels = rotate_about_center(labels, np.rad2deg(gridangle))
+        _, labels = cv.threshold(labels, 140, 255, cv.THRESH_BINARY)
+
+        #filter out "gaps" in the grid
+        filterout = cv.morphologyEx(labels, cv.MORPH_DILATE, cv.getStructuringElement(cv.MORPH_ELLIPSE, (5, 5)), iterations = 2)
+        _, cnts, __ = cv.findContours(filterout, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        cnts = list(filter(lambda x: cv.contourArea(x) > 200, cnts))
+        cnts = sorted(cnts, key=cv.contourArea, reverse=True)
+
+        filterout = np.zeros_like(labels)
+        cv.drawContours(filterout, cnts, 0, 255, -1)
+        labels = cv.bitwise_and(labels, labels, mask=filterout)
+
+        labels = cv.morphologyEx(labels, cv.MORPH_ERODE, cv.getStructuringElement(cv.MORPH_ELLIPSE, (5,5)), iterations = 2)
+
+        # make the contours into straight rectangles
+        _, cnts, __ = cv.findContours(labels, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            self.grid_scale = 20 #in case of failure use a reasonable constant instead
+            return
+
+        for cnt in cnts:
+            x, y, w, h = cv.boundingRect(cnt)
+            labels = cv.rectangle(labels, (x, y), (x+w, y+h), 255, -1)
+
+        #sum up rows and columns and get peaks
+        sumofrows = np.sum(labels, axis=0) #vertical
+        sumofcols = np.sum(labels, axis=1) #horizontal
+        rowpeaks = find_peaks_cwt(sumofrows, np.arange(2, 15))
+        colpeaks = find_peaks_cwt(sumofcols, np.arange(2, 15))
+
+        #take the distance between each peak
+        diffs = []
+        for peaks in (rowpeaks, colpeaks):
+            peakdiff = np.append([0], peaks)
+            peaks = np.append(peaks, [0])
+            diffs.append(np.abs(np.subtract(peakdiff, peaks))[1:-1])
+
+        diffs = np.append(diffs[0], diffs[1])
+        # print("mean:", np.mean(diffs), "std:", np.std(diffs))
+        # peak visualization:
+        # for peak in rowpeaks:
+        #     labels = cv.line(labels, (peak, 0), (peak, labels.shape[0]-1), 127, 1)
+        # for peak in colpeaks:
+        #     labels = cv.line(labels, (0, peak), (labels.shape[1]-1, peak), 127, 1)
+
+        if np.std(diffs) < 10: self.grid_scale = np.mean(diffs)
+        else: self.grid_scale = 20 #in case of failure use a reasonable constant instead
+
 
 
 
